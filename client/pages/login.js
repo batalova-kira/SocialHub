@@ -10,7 +10,6 @@ export default function Login() {
 
     const handleLogin = async (e) => {
         e.preventDefault();
-
         try {
             const res = await fetch("http://localhost:8000/login", {
                 method: "POST",
@@ -19,15 +18,18 @@ export default function Login() {
             });
 
             const data = await res.json();
-
             if (!res.ok) throw new Error(data.detail || "Login failed");
 
+            console.log("Отримано токен:", data.access_token); // Лог для дебагу
             localStorage.setItem("token", data.access_token);
             router.push("/dashboard");
         } catch (err) {
             setError(err.message);
         }
     };
+
+    // localStorage.setItem("token", data.access_token);
+    // console.log("Токен збережено:", localStorage.getItem("token"));
 
     return (
         <div className="max-w-md mx-auto mt-10 p-6 bg-white rounded-lg shadow-md">
