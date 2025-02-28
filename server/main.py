@@ -1,20 +1,21 @@
 import os
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import Body, Depends, FastAPI, HTTPException, status
+from fastapi import Body, Depends, FastAPI, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
+from fastapi.responses import JSONResponse, Response
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from telethon import TelegramClient
+from telethon.errors import FloodWaitError, SessionPasswordNeededError, SessionExpiredError
 from pydantic import BaseModel
-from database import AsyncSessionLocal, engine
-from models import Base, User
-from telethon.errors import FloodWaitError
+from database import AsyncSessionLocal, engine  # Припускаю, що ці модулі у вас є
+from models import Base, User  # Припускаю, що ці модулі у вас є
 from dotenv import load_dotenv
-from telethon.errors import SessionPasswordNeededError  
+from pydantic import ConfigDict
 from telethon import types
 import asyncio
 
@@ -48,8 +49,8 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # Схема автентифікації
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
-# Зберігання активних сесій Telegram
-tg_clients = {}
+# Тимчасове сховище для сесій
+temp_sessions = {}
 
 # Моделі запитів
 class UserCreate(BaseModel):
@@ -64,22 +65,56 @@ class TelegramSendCode(BaseModel):
     phone: str
 
 class TelegramConnect(BaseModel):
-    code: str  # Обов'язкове поле
-    password: Optional[str] = None  # Необов'язкове поле
-    phone: Optional[str] = None  # Додаємо як необов'язкове
+    code: str
+    password: Optional[str] = None
+    phone: Optional[str] = None
 
 class TelegramSession(BaseModel):
     phone: str
     phone_code_hash: str
-    client: Optional[types.User] = None  # Зберігаємо клієнт
+    client: Optional[types.User] = None
 
-    # Тимчасове сховище для сесій (можна замінити на Redis або БД)
-temp_sessions = {}
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 # Залежності
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session
+
+# Логування middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    print(f"Отримано запит: {request.method} {request.url}")
+    response = await call_next(request)
+    print(f"Відповідь: {response.status_code}")
+    return response
+
+# Обробка винятків для CORS
+@app.exception_handler(Exception)
+async def custom_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
+        headers={
+            "Access-Control-Allow-Origin": "http://localhost:3000",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+# Обробка OPTIONS-запитів
+@app.options("/{path:path}")
+async def options_handler():
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "http://localhost:3000",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Allow-Credentials": "true",
+        }
+    )
 
 # Створення таблиць при старті
 @app.on_event("startup")
@@ -99,20 +134,25 @@ async def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db)
 ):
+    print(f"Перевірка токена: {token}")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = payload.get("sub")
+        print(f"Декодовано username: {username}")
         if not username:
-            raise HTTPException(401, "Невірний токен")
+            raise HTTPException(status_code=401, detail="Невірний токен")
 
         result = await db.execute(select(User).filter(User.username == username))
         user = result.scalar_one_or_none()
         if not user:
-            raise HTTPException(401, "Користувача не знайдено")
+            print(f"Користувача {username} не знайдено в базі")
+            raise HTTPException(status_code=401, detail="Користувача не знайдено")
         
+        print(f"Користувач знайдений: {user.username}")
         return user
     except JWTError as e:
-        raise HTTPException(401, f"Помилка токена: {str(e)}")
+        print(f"Помилка JWT: {str(e)}")
+        raise HTTPException(status_code=401, detail="Помилка токена")
 
 # Реєстрація
 @app.post("/register", status_code=201)
@@ -139,46 +179,79 @@ async def login(user: UserLogin, db: AsyncSession = Depends(get_db)):
     token = create_access_token({"sub": db_user.username})
     return {"access_token": token, "token_type": "bearer"}
 
+# Перевірка підключення
 @app.get("/check-connection")
 async def check_connection(current_user: User = Depends(get_current_user)):
-    if not current_user.telegram_phone:
-        return {"connected": False}
-    return {"connected": True}
+    print(f"Перевірка підключення для: {current_user.username}")
+    return {"connected": bool(current_user.telegram_phone)}
+
+# Надсилання коду для Telegram
+@app.post("/send-code")
+async def send_code(
+    data: TelegramSendCode,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    try:
+        if current_user.id in temp_sessions:
+            await temp_sessions[current_user.id]["client"].disconnect()
+            del temp_sessions[current_user.id]
+
+        client = TelegramClient(f"sessions/session_{current_user.id}", API_ID, API_HASH)
+        await client.connect()
+        sent_code = await client.send_code_request(data.phone)
+
+        temp_sessions[current_user.id] = {
+            "phone": data.phone,
+            "phone_code_hash": sent_code.phone_code_hash,
+            "client": client
+        }
+        return {"detail": "Код відправлено"}
+    except FloodWaitError as e:
+        raise HTTPException(429, detail=f"Зачекайте {e.seconds} секунд")
+    except Exception as e:
+        print(f"Помилка в /send-code: {str(e)}")
+        raise HTTPException(400, detail=str(e))
 
 # Підключення Telegram
 @app.post("/connect-telegram")
 async def connect_telegram(
-    auth: TelegramConnect, 
-    current_user: User = Depends(get_current_user)
+    auth: TelegramConnect,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
+    print(f"Спроба підключення Telegram для користувача {current_user.id}")
     try:
-        # Отримуємо сесію
         session_data = temp_sessions.get(current_user.id)
-        if not session_data or not session_data.client:
+        if not session_data or "client" not in session_data:
             raise HTTPException(400, "Спочатку отримайте код")
-        
-        client = session_data.client
-        
-        # Авторизація
+
+        client = session_data["client"]
+        await client.connect()
+
         try:
             await client.sign_in(
-                phone=session_data.phone,
+                phone=session_data["phone"],
                 code=auth.code,
-                phone_code_hash=session_data.phone_code_hash,
-                password=auth.password or None
+                phone_code_hash=session_data["phone_code_hash"]
             )
         except SessionPasswordNeededError:
-            raise HTTPException(400, "Потрібен пароль 2FA")
-        
-        # Оновлення статусу користувача
-        current_user.telegram_phone = session_data.phone
+            if not auth.password:
+                raise HTTPException(400, "Потрібен пароль 2FA")
+            await client.sign_in(password=auth.password)
+
+        # Зберігаємо сесію
         await client.disconnect()
+        current_user.telegram_phone = session_data["phone"]
+        await db.commit()
         del temp_sessions[current_user.id]
-        
+
+        print(f"Telegram успішно підключено для {current_user.id}")
         return {"status": "Connected"}
-    
+    except SessionPasswordNeededError:
+        raise HTTPException(400, "Потрібен пароль 2FA")
     except Exception as e:
-        print(f"Помилка авторизації: {str(e)}")
+        print(f"Помилка в /connect-telegram: {str(e)}")
         raise HTTPException(400, f"Помилка: {str(e)}")
 
 # Отримання чатів
@@ -186,68 +259,53 @@ async def connect_telegram(
 async def get_chats(current_user: User = Depends(get_current_user)):
     if not current_user.telegram_phone:
         raise HTTPException(status_code=400, detail="Telegram не підключено")
-    
-    client = TelegramClient(f'session_{current_user.telegram_phone}', API_ID, API_HASH)
-    await client.connect()
 
-    if not await client.is_user_authorized():
-        raise HTTPException(status_code=400, detail="Необхідно авторизуватися в Telegram")
-    
-    dialogs = await client.get_dialogs()
-    return [{"id": d.id, "name": d.name} for d in dialogs]
-
-# Отримання коду
-@app.post("/send-code")
-async def send_code(
-    data: TelegramSendCode, 
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
     try:
-        # Перевірка існуючих сесій
-        if current_user.id in temp_sessions:
-            await temp_sessions[current_user.id].client.disconnect()
-            del temp_sessions[current_user.id]
-
-        # Ініціалізація клієнта
-        client = TelegramClient(
-            session=StringSession(),  # Використовуємо in-memory сесію
-            api_id=int(API_ID),
-            api_hash=API_HASH
-        )
+        client = TelegramClient(f"sessions/session_{current_user.id}", API_ID, API_HASH)
         await client.connect()
-        
-        # Відправка коду
-        sent_code = await client.send_code_request(data.phone)
-        
-        # Зберігаємо дані
-        temp_sessions[current_user.id] = {
-            "phone": data.phone,
-            "phone_code_hash": sent_code.phone_code_hash,
-            "client": client.session.save()  # Зберігаємо сесію як строку
-        }
-        
-        return {"detail": "Код відправлено"}
-    
-    except FloodWaitError as e:
-        raise HTTPException(429, detail=f"Зачекайте {e.seconds} секунд")
-    except Exception as e:
-        print(f"Помилка відправки: {str(e)}")
-        raise HTTPException(400, detail=str(e))
 
-# Отримання повідомлень чата
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            raise HTTPException(status_code=400, detail="Необхідно авторизуватися в Telegram")
+
+        dialogs = await client.get_dialogs()
+        await client.disconnect()
+
+        print(f"Чати отримано для {current_user.id}")
+        return [{"id": d.id, "name": d.name} for d in dialogs]
+    except FloodWaitError as e:
+        raise HTTPException(status_code=429, detail=f"Зачекайте {e.seconds} секунд")
+    except SessionExpiredError:
+        raise HTTPException(status_code=400, detail="Сесія закінчилася, підключіться заново")
+    except Exception as e:
+        print(f"Помилка в /chats: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Внутрішня помилка: {str(e)}")
+
+# Отримання повідомлень чату
 @app.get("/chats/{chat_id}/messages")
 async def get_chat_messages(
     chat_id: int,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    client = tg_clients.get(current_user.telegram_phone)
-    if not client:
-        raise HTTPException(status_code=404, detail="Telegram not connected")
+    if not current_user.telegram_phone:
+        raise HTTPException(status_code=400, detail="Telegram не підключено")
 
-    messages = await client.get_messages(chat_id, limit=20)
-    return [{"id": m.id, "text": m.text, "date": m.date} for m in messages]
+    try:
+        client = TelegramClient(f"sessions/session_{current_user.id}", API_ID, API_HASH)
+        await client.connect()
+
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            raise HTTPException(status_code=400, detail="Сесія не авторизована")
+
+        messages = await client.get_messages(chat_id, limit=20)
+        await client.disconnect()
+
+        return [{"id": m.id, "text": m.text, "date": m.date.isoformat()} for m in messages]
+    except Exception as e:
+        print(f"Помилка в /chats/{chat_id}/messages: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Вихід з Telegram
 @app.post("/logout-telegram")
@@ -255,11 +313,11 @@ async def logout_telegram(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    client = tg_clients.pop(current_user.telegram_phone, None)
-    if client:
-        await client.disconnect()
+    if current_user.telegram_phone and os.path.exists(f"sessions/session_{current_user.id}"):
+        os.remove(f"sessions/session_{current_user.id}")
     current_user.telegram_phone = None
     await db.commit()
+    print(f"Telegram відключено для {current_user.id}")
     return {"message": "Telegram disconnected"}
 
 # Вихід з системи
