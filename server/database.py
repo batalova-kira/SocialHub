@@ -1,19 +1,20 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
 
-SQLALCHEMY_DATABASE_URL = "sqlite+aiosqlite:///./socialhub.db"
+DATABASE_URL = "sqlite+aiosqlite:///socialhub.db"
 
-# Створення асинхронного двигуна
 engine = create_async_engine(
-    SQLALCHEMY_DATABASE_URL,
-    echo=True  # Логування SQL-запитів (опційно)
+    DATABASE_URL,
+    connect_args={"timeout": 30},  # Збільшено тайм-аут
+    echo=True
 )
 
 AsyncSessionLocal = sessionmaker(
-    bind=engine,
+    engine,
     class_=AsyncSession,
     expire_on_commit=False
 )
 
-Base = declarative_base()
+async def get_db():
+    async with AsyncSessionLocal() as session:
+        yield session

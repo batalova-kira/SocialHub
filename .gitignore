@@ -20,3 +20,14 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+
+# Віртуальні оточення
+venv/
+.env
+
+# Локальні бази даних
+*.db
+
+# Інше
+__pycache__/
+*.pyc

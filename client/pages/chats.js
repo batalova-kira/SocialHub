@@ -30,12 +30,15 @@ export default function Chats() {
 
     return (
         <div className="max-w-4xl mx-auto p-6">
-            <h1 className="text-2xl font-bold mb-6">Ваші чати</h1>
+            <h1 className="text-2xl font-bold mb-6 text-gray-800">Ваші чати</h1>
             {error && <p className="text-red-500 mb-4">{error}</p>}
             <div className="space-y-4">
                 {chats.map((chat) => (
-                    <div key={chat.id} className="p-4 border rounded">
-                        <p>{chat.name}</p>
+                    <div
+                        key={chat.id}
+                        className="bg-white p-4 rounded-lg shadow-md border border-gray-200 hover:shadow-lg transition-shadow"
+                    >
+                        <p className="text-gray-700 font-medium">{chat.name}</p>
                     </div>
                 ))}
             </div>
