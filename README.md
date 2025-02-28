@@ -110,7 +110,3 @@ npm run dev
 Author: https://github.com/batalova-kira
 
 Feedback? Open an https://github.com/batalova-kira/socialhub/issues. 🚀
-
-```
-
-```
