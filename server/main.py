@@ -241,7 +241,7 @@ async def connect_telegram(
 
         await client.disconnect()
         current_user.telegram_phone = session_data["phone"]
-        await asyncio.sleep(0.5)  # Збільшена затримка перед комітом
+        await asyncio.sleep(0.5)
         await db.commit()
         del temp_sessions[current_user.id]
 
@@ -259,19 +259,23 @@ async def get_chats(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Telegram не підключено")
 
     try:
-        await asyncio.sleep(1)  # Збільшена затримка для уникнення конфлікту з /connect-telegram
+        await asyncio.sleep(2)
+        print(f"Fetching chats for user {current_user.id}")
         client = TelegramClient(f"sessions/session_{current_user.id}", API_ID, API_HASH)
         await client.connect()
 
-        if not await client.is_user_authorized():
+        is_authorized = await client.is_user_authorized()
+        print(f"User authorized: {is_authorized}")
+        if not is_authorized:
             await client.disconnect()
             raise HTTPException(status_code=400, detail="Необхідно авторизуватися в Telegram")
 
         dialogs = await client.get_dialogs()
         await client.disconnect()
 
-        print(f"Чати отримано для {current_user.id}")
-        return [{"id": d.id, "name": d.name} for d in dialogs]
+        result = [{"id": d.id, "name": d.name} for d in dialogs]
+        print(f"Чати отримано для {current_user.id}: {result}")
+        return result
     except FloodWaitError as e:
         raise HTTPException(status_code=429, detail=f"Зачекайте {e.seconds} секунд")
     except SessionExpiredError:
@@ -287,20 +291,30 @@ async def get_chat_messages(
     db: AsyncSession = Depends(get_db)
 ):
     if not current_user.telegram_phone:
+        print(f"User {current_user.id} has no telegram_phone")
         raise HTTPException(status_code=400, detail="Telegram не підключено")
 
     try:
         client = TelegramClient(f"sessions/session_{current_user.id}", API_ID, API_HASH)
         await client.connect()
+        print(f"Fetching messages for chat_id: {chat_id}, user: {current_user.id}")
 
         if not await client.is_user_authorized():
             await client.disconnect()
+            print("User not authorized")
             raise HTTPException(status_code=400, detail="Сесія не авторизована")
 
+        print(f"Requesting messages for chat_id: {chat_id}")
         messages = await client.get_messages(chat_id, limit=20)
+        print(f"Received {len(messages)} messages for chat_id: {chat_id}")
+        for msg in messages:
+            print(f"Message ID: {msg.id}, Text: {msg.text if msg.text else '[No text]'}")
+        
         await client.disconnect()
 
-        return [{"id": m.id, "text": m.text, "date": m.date.isoformat()} for m in messages]
+        result = [{"id": m.id, "text": m.text if m.text else "[No text]", "date": m.date.isoformat()} for m in messages]
+        print(f"Returning messages: {result}")
+        return result
     except Exception as e:
         print(f"Помилка в /chats/{chat_id}/messages: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

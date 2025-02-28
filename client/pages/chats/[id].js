@@ -6,36 +6,54 @@ export default function ChatMessages() {
     const [messages, setMessages] = useState([]);
     const [error, setError] = useState("");
     const router = useRouter();
-    const { chat_id } = router.query;
+    const { id } = router.query; // Змінено з chat_id на id
 
     useEffect(() => {
+        console.log("useEffect triggered, router.query:", router.query);
+        console.log("id from query:", id);
+
         const fetchMessages = async () => {
             const token = localStorage.getItem("token");
-            if (!token || !chat_id) {
+            if (!token || !id) {
+                console.log("No token or id, redirecting to /login");
                 router.push("/login");
                 return;
             }
 
             try {
+                console.log("Fetching messages for id:", id);
                 const res = await fetch(
-                    `http://localhost:8000/chats/${chat_id}/messages`,
+                    `http://localhost:8000/chats/${id}/messages`,
                     {
                         headers: { Authorization: `Bearer ${token}` },
                     }
                 );
-                if (!res.ok)
-                    throw new Error("Не вдалося завантажити повідомлення");
+                console.log("Response status:", res.status);
+
+                if (!res.ok) {
+                    const errorData = await res.json();
+                    console.log("Error data:", errorData);
+                    throw new Error(
+                        errorData.detail ||
+                            "Не вдалося завантажити повідомлення"
+                    );
+                }
+
                 const data = await res.json();
+                console.log("Messages received:", data);
                 setMessages(data);
             } catch (err) {
+                console.error("Fetch error:", err.message);
                 setError(err.message);
             }
         };
 
-        if (chat_id) {
+        if (router.isReady && id) {
             fetchMessages();
+        } else {
+            console.log("Waiting for router to be ready or id to be defined");
         }
-    }, [chat_id, router]);
+    }, [id, router.isReady, router]); // Змінено chat_id на id
 
     return (
         <div className="max-w-4xl mx-auto p-6">
@@ -54,17 +72,21 @@ export default function ChatMessages() {
             {error && <p className="text-red-500 mb-4">{error}</p>}
 
             <div className="space-y-3">
-                {messages.map((message) => (
-                    <div
-                        key={message.id}
-                        className="bg-white p-3 rounded-md border-b border-gray-200 text-gray-700"
-                    >
-                        <p className="text-sm">{message.text}</p>
-                        <p className="text-xs text-gray-500 mt-1">
-                            {new Date(message.date).toLocaleString()}
-                        </p>
-                    </div>
-                ))}
+                {messages.length > 0 ? (
+                    messages.map((message) => (
+                        <div
+                            key={message.id}
+                            className="bg-white p-3 rounded-md border-b border-gray-200 text-gray-700"
+                        >
+                            <p className="text-sm">{message.text}</p>
+                            <p className="text-xs text-gray-500 mt-1">
+                                {new Date(message.date).toLocaleString()}
+                            </p>
+                        </div>
+                    ))
+                ) : (
+                    <p className="text-gray-500">Немає повідомлень</p>
+                )}
             </div>
         </div>
     );

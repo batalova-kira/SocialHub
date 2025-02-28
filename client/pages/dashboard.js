@@ -134,6 +134,9 @@ export default function Dashboard() {
                 const res = await fetch("http://localhost:8000/chats", {
                     headers: { Authorization: `Bearer ${token}` },
                 });
+                console.log(
+                    `Спроба ${attempt + 1}: Статус відповіді: ${res.status}`
+                );
 
                 if (res.status === 500) {
                     console.log(
@@ -151,15 +154,29 @@ export default function Dashboard() {
 
                 if (!res.ok) {
                     const data = await res.json();
+                    console.log(`Помилка від сервера: ${JSON.stringify(data)}`);
+                    if (
+                        res.status === 400 &&
+                        data.detail === "Необхідно авторизуватися в Telegram"
+                    ) {
+                        setIsConnected(false);
+                        setIsCodeSent(false);
+                        setChats([]);
+                        return;
+                    }
                     throw new Error(
                         data.detail || "Не вдалося завантажити чати"
                     );
                 }
 
                 const data = await res.json();
+                console.log("Чати отримані:", data);
                 setChats(data);
                 break;
             } catch (err) {
+                console.error(
+                    `Помилка на спробі ${attempt + 1}: ${err.message}`
+                );
                 if (attempt === retries - 1) {
                     setError(err.message);
                 }
@@ -267,7 +284,13 @@ export default function Dashboard() {
                                 className="bg-white p-3 rounded-md border-b border-gray-200 hover:bg-gray-50 transition-colors"
                             >
                                 <Link
-                                    href={`/chats/${chat.id}`}
+                                    href={`/chats/${chat.id}`} // Без parseInt, бо id уже int із сервера
+                                    onClick={() =>
+                                        console.log(
+                                            "Navigating to chat_id:",
+                                            chat.id
+                                        )
+                                    }
                                     className="text-gray-800 hover:text-green-600 font-medium transition-colors"
                                 >
                                     {chat.name}
